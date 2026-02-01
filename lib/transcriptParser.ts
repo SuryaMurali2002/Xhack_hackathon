@@ -4,29 +4,39 @@
  * No character cap — scans full transcript. LLM is only used for major/credits fallback.
  */
 
-/** Step 1 — Normalize: uppercase + collapse whitespace for consistent regex matching. */
+/** Step 1 — Normalize: uppercase + collapse all whitespace to single space for consistent regex matching. */
 function normalizeForCourseExtraction(text: string): string {
-  return text.toUpperCase().replace(/\s+/g, " ").trim()
+  return text.toUpperCase().replace(/\s+/g, " ").replace(/\u00A0/g, " ").trim()
 }
 
 /**
  * Step 2–4 — Robust patterns for SFU course codes.
- * Matches: CMPT 225, CMPT225, CMPT-225, with grade or transfer as completed signal.
+ * pdf-parse often strips spaces inside tables: "CHEMX120.0 A TR" (no space between dept, number, units).
+ * Use \s* (optional space) between number/units/grade so run-together text matches.
  */
 
-/** Primary: course code + optional units/term + letter grade. Handles "CMPT 120 3.0 B+" and "CMPT 120 3.0 1231 B+". */
-const COURSE_AND_GRADE_RE = /\b([A-Z]{3,4})[- ]?(\d{3}[A-Z]?)(?:\s+[\d.]+)?(?:\s+\d+)?\s+([A-F][+-]?|CR)(?=\s|$)/g
+/** Course number: 3 digits + optional letter (225, 105W) OR letter + 2 digits only (X12, X99 transfer). */
+const COURSE_NUM = "(?:\\d{3}[A-Z]?|[A-Z]\\d{2})"
 
-/** Transfer completed/credit: e.g. "CMPT 125 3.0 B TR-C". Grade may be B+ so use lookahead. */
-const COURSE_AND_TRANSFER_RE = /\b([A-Z]{3,4})[- ]?(\d{3}[A-Z]?)\s+[\d.]+\s+[A-F][+-]?(?=\s+TR-[CT])/g
+/** Primary: course + optional units/term + letter grade. \s* so "CMPT2253.0 B-" and "CMPT 225 3.0 B-" both match. */
+const COURSE_AND_GRADE_RE = new RegExp(
+  `\\b([A-Z]{3,4})[- ]?(${COURSE_NUM})(?:\\s*[\\d.]+)?(?:\\s*\\d+)?\\s*([A-F]\\s*[+-]?|CR)(?=\\s|$|\\d)`,
+  "g"
+)
 
-/** Fallback: course code only (3–4 letter dept, optional - or space, 3 digits optional letter). Use only if nearby grade/TR. */
-const COURSE_CODE_ONLY_RE = /\b([A-Z]{3,4})[- ]?(\d{3}[A-Z]?)\b/g
+/** Transfer: dept + number + units (no space between them in pdf-parse). e.g. "CHEMX120.0 A TR-C". */
+const COURSE_AND_TRANSFER_RE = new RegExp(
+  `\\b([A-Z]{3,4})[- ]?(${COURSE_NUM})\\s*[\\d.]+\\s*([A-F]\\s*[+-]?|CR|TR)(?=\\s+TR-[CT])`,
+  "g"
+)
+
+/** Fallback: course code only. Use only if nearby grade/TR. */
+const COURSE_CODE_ONLY_RE = new RegExp(`\\b([A-Z]{3,4})[- ]?(${COURSE_NUM})\\b`, "g")
 
 /** Step 6 — Whitelist of valid SFU department codes. Filters out GPA, TERM, etc. */
 const VALID_DEPTS = new Set([
-  "ARCH", "BISC", "BUS", "CA", "CHEM", "CMNS", "CMPT", "EDUC", "ENGL", "ENSC", "GEOG", "HUM",
-  "IAT", "MACM", "MATH", "PHIL", "PHYS", "POL", "PSYC", "STAT",
+  "ARCH", "BISC", "BUS", "CA", "CHEM", "CMNS", "CMPT", "EDUC", "ENGL", "ENSC", "FAL", "FAN",
+  "GEOG", "HUM", "IAT", "MACM", "MATH", "PHIL", "PHYS", "POL", "PSYC", "STAT",
 ])
 
 function isWhitelistedDept(dept: string): boolean {
@@ -38,6 +48,9 @@ const DEBUG_TRANSCRIPT = process.env.DEBUG_TRANSCRIPT === "true" || process.env.
 /**
  * Extract all completed course codes from full transcript text.
  * Uses normalized text, grade-inclusive and transfer patterns, and dept whitelist.
+ *
+ * Completed = has letter grade (A–F, CR) or transfer credit (TR-C/TR-T).
+ * Excluded = in-progress (0.00 grade points, no final grade) and admin lines (e.g. CF PREQ).
  */
 export function extractCompletedCoursesFromTranscript(rawText: string): { code: string }[] {
   const seen = new Set<string>()
@@ -47,6 +60,21 @@ export function extractCompletedCoursesFromTranscript(rawText: string): { code: 
     console.log("[transcriptParser] rawText.length:", rawText.length)
     console.log("[transcriptParser] normalized text.length:", text.length)
     console.log("[transcriptParser] normalized sample (first 400 chars):", JSON.stringify(text.slice(0, 400)))
+    // Log the exact slice where course lines live so we can see why regex fails
+    const transferIdx = text.indexOf("TRANSFER")
+    const cmptIdx = text.indexOf("CMPT")
+    const subCatIdx = text.indexOf("SUB CAT")
+    const courseSectionStart = Math.min(
+      transferIdx >= 0 ? transferIdx : text.length,
+      subCatIdx >= 0 ? subCatIdx : text.length,
+      cmptIdx >= 0 ? Math.max(0, cmptIdx - 100) : text.length
+    )
+    if (courseSectionStart < text.length) {
+      const slice = text.slice(courseSectionStart, courseSectionStart + 1200)
+      console.log("[transcriptParser] --- NORMALIZED TEXT AROUND COURSES (for regex debugging) ---")
+      console.log(JSON.stringify(slice))
+      console.log("[transcriptParser] --- END SLICE ---")
+    }
   }
 
   // Pattern 1: Course + grade (A–F, CR)
@@ -83,7 +111,7 @@ export function extractCompletedCoursesFromTranscript(rawText: string): { code: 
   // Pattern 3: Course code only, but only if context has a real grade/transfer (avoid GPA, TERM, and STUDENT GROUP "CF PREQ")
   // Require grade followed by space+digit (e.g. "B+ 9.99") or TR-C/TR-T so we don't match lone "C" in "CF PREQ" or "CMPT"
   const fromFallback: string[] = []
-  const realGradeOrTransfer = /(?:[A-F][+-]?|CR)\s+[\d.]|\bTR-[CT]\b/
+  const realGradeOrTransfer = /(?:[A-F]\s*[+-]?|CR)\s+[\d.]|\bTR-[CT]\b/
   const studentGroupOrPreq = /CF\s+PREQ|PREQ\s+SET|STUDENT\s+GROUP|CS\d+\s+-/i
   COURSE_CODE_ONLY_RE.lastIndex = 0
   while ((m = COURSE_CODE_ONLY_RE.exec(text)) !== null) {

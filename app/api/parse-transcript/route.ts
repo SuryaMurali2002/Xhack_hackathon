@@ -9,6 +9,9 @@ import { promptOpenAI, parseOpenAIJson } from "@/lib/openai"
 import type { ParsedTranscript } from "@/lib/types"
 
 const FALLBACK_HEADER_CHARS = 2500
+/** When local extraction finds fewer than this many courses, use OpenAI to extract courses from transcript. */
+const MIN_COURSES_FOR_LOCAL_ONLY = 5
+const MAX_TRANSCRIPT_CHARS_FOR_LLM = 14000
 
 /** Fallback: use OpenAI only for major and total_credits (small payload). */
 const MAJOR_CREDITS_SYSTEM = `From this SFU transcript snippet, return JSON with:
@@ -16,6 +19,20 @@ const MAJOR_CREDITS_SYSTEM = `From this SFU transcript snippet, return JSON with
 - total_credits_completed (number from Total Units or Passed)
 
 Return ONLY valid JSON. Example: {"student_major":"Computing Science","total_credits_completed":92}`
+
+/** Fallback: extract completed SFU courses when regex fails (e.g. pdf-parse spacing). */
+const EXTRACT_COURSES_SYSTEM = `You are extracting completed SFU courses from an advising transcript.
+
+Rules:
+- Include only courses that have a final letter grade (A+, A, A-, B+, B, B-, C+, C, C-, D, F) or CR, or transfer credit (TR-C/TR-T).
+- Exclude transfer courses that are high-school style (e.g. CHEM X12, MATH X12, FAN X99, FAL X99).
+- Exclude in-progress courses (grade points 0.00 or no grade).
+- Return course codes exactly as "DEPT NNN" or "DEPT NNNW" (e.g. CMPT 225, CMPT 105W, STAT 270).
+
+Return JSON only, in this exact shape:
+{"completed_courses":[{"code":"CMPT 120"},{"code":"CMPT 125"},{"code":"MATH 150"}]}
+
+No other keys. No explanation.`
 
 export async function POST(req: Request) {
   try {
@@ -50,7 +67,34 @@ export async function POST(req: Request) {
     }
 
     // 1) Local extraction from FULL transcript (no cap) — captures all completed courses
-    const completed_courses = extractCompletedCoursesFromTranscript(rawText)
+    let completed_courses = extractCompletedCoursesFromTranscript(rawText)
+
+    // 2) If regex found too few courses (pdf-parse spacing/format varies), use OpenAI to extract courses
+    if (
+      completed_courses.length < MIN_COURSES_FOR_LOCAL_ONLY &&
+      process.env.OPENAI_API_KEY?.trim()
+    ) {
+      const transcriptForLlm = rawText.slice(0, MAX_TRANSCRIPT_CHARS_FOR_LLM)
+      try {
+        const responseText = await promptOpenAI(`Transcript:\n${transcriptForLlm}`, {
+          system: EXTRACT_COURSES_SYSTEM,
+          json: true,
+        })
+        const parsed = parseOpenAIJson<{ completed_courses: { code: string }[] }>(responseText)
+        if (Array.isArray(parsed.completed_courses) && parsed.completed_courses.length > 0) {
+          completed_courses = parsed.completed_courses.map((c) =>
+            typeof c?.code === "string" ? { code: c.code.trim() } : { code: "" }
+          ).filter((c) => c.code.length > 0)
+          if (process.env.NODE_ENV === "development" || process.env.DEBUG_TRANSCRIPT === "true") {
+            console.log("[parse-transcript] OpenAI fallback extracted completed_courses count:", completed_courses.length)
+          }
+        }
+      } catch (e) {
+        if (process.env.NODE_ENV === "development" || process.env.DEBUG_TRANSCRIPT === "true") {
+          console.warn("[parse-transcript] OpenAI course extraction fallback failed:", e)
+        }
+      }
+    }
 
     if (process.env.NODE_ENV === "development" || process.env.DEBUG_TRANSCRIPT === "true") {
       console.log("[parse-transcript] extracted completed_courses count:", completed_courses.length)
@@ -59,7 +103,7 @@ export async function POST(req: Request) {
     let student_major = extractMajorFromTranscript(rawText)
     let total_credits_completed = extractTotalCreditsFromTranscript(rawText)
 
-    // 2) Fallback to OpenAI only for major/credits if regex missed them
+    // 3) Fallback to OpenAI only for major/credits if regex missed them
     if (!student_major || total_credits_completed == null) {
       if (process.env.OPENAI_API_KEY?.trim()) {
         const snippet = rawText.slice(0, FALLBACK_HEADER_CHARS)

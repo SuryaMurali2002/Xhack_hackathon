@@ -10,11 +10,11 @@
   },
   "dependencies": {
     "axios": "^1.7.7",
-    "groq-sdk": "^0.5.0",
     "next": "14.2.18",
+    "openai": "^4.104.0",
+    "pdf-parse": "^1.1.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "zod": "^3.23.8"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",

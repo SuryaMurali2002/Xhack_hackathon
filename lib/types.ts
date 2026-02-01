@@ -1,29 +1,24 @@
-export type UserProfile = {
+/** Parsed transcript from OpenAI (from raw PDF text). */
+export type ParsedTranscript = {
+  student_major: string
+  completed_courses: { code: string }[]
+  total_credits_completed: number
+}
+
+/** One recommended course with reason (from planner). */
+export type RecommendedCourse = {
+  course_code: string
+  course_name?: string
+  reason: string
+}
+
+/** Response from recommend-courses API. */
+export type RecommendCoursesResponse = {
   major: string
-  /** Optional department code for SFU (e.g. CMPT, STAT, MATH). Improves course suggestions. */
-  departmentCode?: string
-  completedCourses: string[]
-  targetRole: string
-  timelineMonths: number
-}
-
-export type RoadmapWeek = {
-  week: number
-  skill: string
-  sfuCourse?: string
-  project: string
-  resource: string
-  action: string
-}
-
-export type RoadmapResponse = {
-  weeks: RoadmapWeek[]
-  internships: Internship[]
-}
-
-export type Internship = {
-  title: string
-  company: string
-  location: string
-  url: string
+  target_role: string
+  /** Units/credits completed (from transcript). */
+  total_credits_completed: number
+  /** Units remaining until 120 credits (SFU typical degree). */
+  credits_remaining: number
+  recommended_courses: RecommendedCourse[]
 }

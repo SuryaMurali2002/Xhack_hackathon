@@ -162,6 +162,36 @@ export function slimOutlinesForPrompt(
 }
 
 /**
+ * Sort outlines by course level (1xx, 2xx, 3xx, 4xx) so foundation courses appear first.
+ */
+export function sortOutlinesByLevel(outlines: CourseOutline[]): CourseOutline[] {
+  const num = (o: CourseOutline) => parseInt(o.number, 10) || 0
+  return [...outlines].sort((a, b) => num(a) - num(b))
+}
+
+/**
+ * Merge two outline lists, dedupe by dept+number, cap at maxCourses.
+ * Used to combine keyword-based and department-based results for variety.
+ */
+export function mergeOutlines(
+  listA: CourseOutline[],
+  listB: CourseOutline[],
+  maxCourses = 20
+): CourseOutline[] {
+  const seen = new Set<string>()
+  const merged: CourseOutline[] = []
+  for (const o of [...listA, ...listB]) {
+    const key = `${o.dept} ${o.number}`.trim().toLowerCase()
+    if (key && !seen.has(key)) {
+      seen.add(key)
+      merged.push(o)
+      if (merged.length >= maxCourses) break
+    }
+  }
+  return merged
+}
+
+/**
  * Fetch outlines for multiple department codes, merge and dedupe, cap at maxCourses.
  * Limits to first maxDepts to avoid huge payloads and token limits.
  */
